@@ -1,0 +1,19 @@
+{
+  "name": "dummy-api-hono",
+  "private": true,
+  "type": "module",
+  "description": "DUMMY-API (Bun + Hono) untuk load test: 3 endpoint GET berisi data acak, target ribuan RPS",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "bench": "bun run scripts/bench.ts"
+  },
+  "dependencies": {
+    "hono": "^4.12.31"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

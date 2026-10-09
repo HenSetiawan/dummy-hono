@@ -1,0 +1,64 @@
+# DUMMY-API untuk load test: target curl/k6/gatling di http://localhost:9000
+#
+#   docker compose -f dummy-api-hono/docker-compose.yml up -d --build
+#   curl http://localhost:9000/random/user
+#
+# Angka RPS tertinggi didapat kalau beban datang dari **network yang sama** (bukan lewat
+# port publish / docker-proxy). Untuk itu ada profil `k6`:
+#
+#   docker compose -f dummy-api-hono/docker-compose.yml --profile k6 run --rm k6
+#
+# di situ k6 menembak http://dummy-api-hono:9000 langsung di network compose.
+services:
+  dummy-api-hono:
+    build:
+      context: .
+      args:
+        # Samakan dengan versi Bun lokal bila perlu.
+        BUN_VERSION: "1.4.2"
+    ports:
+      # Host 9000 -> container 9000 (lihat README bila ingin `network_mode: host`).
+      - "9000:9000"
+    environment:
+      PORT: 9000
+      # `auto` = jumlah core; SO_REUSEPORT membagi koneksi antar proses (Linux only).
+      API_PROCS: auto
+      # 0 = tanpa log per request (menyalakannya memotong throughput).
+      ACCESS_LOG: 0
+    # Throughput tinggi = banyak koneksi bersamaan; default 1024 terlalu kecil.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    # Backlog listen yang lebih besar supaya lonjakan koneksi tidak langsung ditolak.
+    sysctls:
+      net.core.somaxconn: 4096
+      net.ipv4.tcp_tw_reuse: 1
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    init: true
+    stop_grace_period: 10s
+    restart: unless-stopped
+
+  # Opsional: k6 dari network yang sama (hindari overhead NAT/port publish).
+  k6:
+    image: grafana/k6:latest
+    profiles: ["k6"]
+    depends_on:
+      dummy-api-hono:
+        condition: service_healthy
+    volumes:
+      - ../k6:/scripts:ro
+    environment:
+      DUMMY_URL: http://dummy-api-hono:9000
+      TARGET_URL: http://dummy-api-hono:9000
+      PATHS: /random/user,/random/items?size=10,/random/stats,/healthz
+      VUS: "100"
+      DURATION: 20s
+    # Script k6 tersedia di ../k6 (dipakai bersama repo ini).
+    working_dir: /scripts
+    command: ["run", "/scripts/direct.js"]
