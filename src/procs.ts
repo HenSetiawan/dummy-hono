@@ -11,6 +11,7 @@
 
 export const API_PROCS_ENV = "API_PROCS";
 export const API_PROC_INDEX_ENV = "API_PROC_INDEX";
+export const REUSE_PORT_ENV = "REUSE_PORT";
 
 /** Batas atas: salah ketik (mis. `API_PROCS=400`) tidak boleh men-spawn proses liar. */
 export const MAX_API_PROCS = 64;
@@ -58,4 +59,32 @@ export function procIndexFromEnv(
 
 	const index = Number(raw);
 	return Number.isSafeInteger(index) ? index : null;
+}
+
+export type ReusePortPlan = { ok: true; reusePort: boolean } | { ok: false; message: string };
+
+/**
+ * `REUSE_PORT` mengatur flag `Bun.serve({ reusePort })` (= `SO_REUSEPORT`) secara eksplisit.
+ *
+ * - `auto` (default): menyala kalau `API_PROCS > 1` - satu supervisor + N anak berbagi port.
+ * - `1`: selalu menyala. Ini yang dipakai untuk **clustering lintas container**: beberapa
+ *   container (mis. `deploy.replicas: 4` dengan `network_mode: host`) masing-masing
+ *   `API_PROCS=1` + `REUSE_PORT=1`, lalu kernel membagi koneksi baru ke semuanya.
+ *   Konsekuensi yang harus disadari: dengan `REUSE_PORT=1`, proses kedua yang tak sengaja
+ *   bind port yang sama **tidak** gagal `EADDRINUSE` - dia ikut melayani.
+ * - `0`: selalu mati (single proses, gagal keras kalau port sudah dipakai).
+ *
+ * Hanya efektif di Linux; di Windows flag ini tidak membagi trafik.
+ */
+export function parseReusePort(raw: string | undefined, procs: number): ReusePortPlan {
+	const value = (raw ?? "").trim().toLowerCase();
+
+	if (value === "" || value === "auto") return { ok: true, reusePort: procs > 1 };
+	if (value === "1" || value === "true" || value === "on") return { ok: true, reusePort: true };
+	if (value === "0" || value === "false" || value === "off") return { ok: true, reusePort: false };
+
+	return {
+		ok: false,
+		message: `${REUSE_PORT_ENV}="${raw}" tidak valid; isi auto, 1, atau 0`,
+	};
 }

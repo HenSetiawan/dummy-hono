@@ -47,6 +47,44 @@ bun run dev            # atau: bun run start
 API_PROCS=auto bun run start   # multi-proses (Linux/WSL; di Windows tidak membagi koneksi)
 ```
 
+### Clustering: pakai lebih dari satu core
+
+Dua cara, keduanya berbasis `SO_REUSEPORT` (kernel membagi **koneksi baru** ke semua proses
+yang bind port yang sama; jadi pembagiannya per koneksi, bukan per request):
+
+**1. Beberapa proses dalam satu container (default compose)** — `API_PROCS=auto`:
+
+```sh
+API_PROCS=auto REUSE_PORT=auto bun run start    # 1 supervisor + N anak (N = jumlah core)
+```
+
+Compose sudah memakai ini, dan log saat boot menunjukkan jumlahnya:
+`[dummy-api] supervisor: 14 proses di :9000 (reusePort=true, ...)`.
+
+**2. Beberapa container (replika) berbagi satu port** — tiap replika `API_PROCS=1`,
+`REUSE_PORT=1`, dan **tanpa** port publish (pakai `network_mode: host` supaya bisa bind 9000
+langsung di host):
+
+```yaml
+services:
+  dummy-api-hono:
+    network_mode: host
+    environment:
+      PORT: 9000
+      API_PROCS: "1"
+      REUSE_PORT: "1"
+    deploy:
+      replicas: 4
+```
+
+Catatan penting:
+
+- Hanya efektif di **Linux**. Di Windows/macOS flag `reusePort` tidak membagi trafik.
+- Dengan `REUSE_PORT=1`, proses kedua yang tidak sengaja bind port yang sama **tidak** gagal
+  `EADDRINUSE` - dia ikut melayani. Kalau ingin jaminan "gagal keras", pakai `REUSE_PORT=0`.
+- Kalau container dibatasi CPU (`cpus:`/`deploy.resources`), set `API_PROCS` manual agar
+  jumlah anaknya tidak melebihi kuota (mis. `cpus: 2` → `API_PROCS=2`).
+
 ## Mengukur RPS
 
 Pengukur bawaan (tanpa dependency, keep-alive, dijalankan di mesin yang sama):
@@ -56,19 +94,25 @@ bun run bench                          # 5 dtk, 50 koneksi, ke http://127.0.0.1:
 bun run bench http://127.0.0.1:9000 10 100
 ```
 
-Untuk load test sungguhan, pakai k6 dari **network yang sama** (port publish/NAT bisa
-memotong angka sampai ~4x):
+Untuk load test sungguhan, jalankan k6 dari **network/mesin yang sama** (port publish/NAT bisa
+memotong angka sampai ~4x). Service k6 **tidak** lagi ada di compose ini supaya compose-nya
+fokus ke API-nya saja; script k6 dijalankan terpisah:
 
 ```sh
-docker compose -f dummy-api-hono/docker-compose.yml --profile k6 run --rm k6
-# override beban: -e VUS=200 -e DURATION=30s
-docker compose -f dummy-api-hono/docker-compose.yml --profile k6 run --rm -e VUS=200 k6
+# di VM/network yang sama dengan API (lihat k6/README.md untuk pasang k6 + ulimit)
+k6 run -e BASE_URL=http://172.16.30.11:9000 k6/rps-items.js
+
+# atau lewat image k6 tanpa mount apa pun
+docker run --rm -i --network host grafana/k6 run -e BASE_URL=http://127.0.0.1:9000 - < k6/rps-items.js
 ```
 
-Service `k6` memakai skrip di `../k6` (`direct.js`) dengan `PATHS` diarahkan ke tiga endpoint
-di atas, jadi tidak perlu setup tambahan. Skrip harness lain (`stress.js`, `soak.js`) bisa
-dipakai dengan `-e DUMMY_URL=http://dummy-api-hono:9000`, tapi `lib/workload.js` mengharapkan
-katalog `GET /__catalog` milik DUMMY-API lama (belum ada di sini — bilang saja kalau perlu).
+`k6/rps-items.js` melaporkan **RPS per tingkat VU** (default 200 → 1000, 1 menit/tingkat) ke
+`/random/items`, dan script-nya berdiri sendiri sehingga bisa disalin apa adanya ke VM.
+Langkah lengkap (pasang k6, `ulimit -n`, jalankan, baca tabel RPS) ada di
+[`k6/README.md`](../k6/README.md#uji-rps-per-tingkat-vu-dual-apis-randomitems).
+
+Skrip harness lain di `k6/` (`stress.js`, `soak.js`) mengharapkan katalog `GET /__catalog`
+milik DUMMY-API lama (belum ada di sini — bilang saja kalau perlu).
 
 ## Env
 
@@ -76,6 +120,7 @@ katalog `GET /__catalog` milik DUMMY-API lama (belum ada di sini — bilang saja
 | --- | --- | --- |
 | `PORT` | `9000` | Port listen |
 | `API_PROCS` | `1` | `1`, `auto`/`0` (= jumlah core), atau angka 1-64. `>1` = supervisor + N anak dengan `SO_REUSEPORT` |
+| `REUSE_PORT` | `auto` | Flag `Bun.serve({ reusePort })` (`SO_REUSEPORT`): `auto` (menyala kalau `API_PROCS>1`), `1` (selalu), `0` (mati). Lihat bagian Clustering |
 | `ACCESS_LOG` | `0` | `1` = log per request (debug; memotong throughput) |
 
 ## Kenapa bisa kencang
@@ -84,8 +129,9 @@ katalog `GET /__catalog` milik DUMMY-API lama (belum ada di sini — bilang saja
   array + `Math.random()`, tanpa query, tanpa pembacaan berkas.
 - **Timestamp ISO di-cache per detik** oleh satu timer; `new Date().toISOString()` per request
   jauh lebih mahal daripada nilainya.
-- **Multi-proses + `SO_REUSEPORT`**: semua core terpakai tanpa load balancer eksternal
-  (pembagiannya per koneksi, jadi baru terasa saat koneksi bersamaan banyak — pola k6).
+- **Multi-proses + `SO_REUSEPORT`** (`API_PROCS`, `REUSE_PORT`): semua core terpakai tanpa load
+  balancer eksternal (pembagiannya per koneksi, jadi baru terasa saat koneksi bersamaan
+  banyak — persis pola load test). Bisa juga lintas container (lihat Clustering).
 - **Tanpa log/kompresi/body parser**: `ACCESS_LOG=0` default, tidak ada middleware kecuali
   diminta.
 - **`idleTimeout: 30`** supaya koneksi keep-alive klien load test tidak diputus default 10 detik.

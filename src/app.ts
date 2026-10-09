@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { clampSize, currentIsoTime, randomItems, randomStats, randomUser } from "./random.js";
+import { serverInfo } from "./server-info.js";
 
 /**
  * App DUMMY-API: **tiga endpoint GET** berisi data acak + `/healthz` untuk healthcheck
@@ -30,7 +31,15 @@ export function createApp(options: AppOptions = {}): Hono {
 	}
 
 	app.get("/healthz", (c) =>
-		c.json({ status: "ok", service: "dummy-api-hono", pid: process.pid, time: currentIsoTime() })
+		c.json({
+			status: "ok",
+			service: "dummy-api-hono",
+			pid: process.pid,
+			// Cermin konfigurasi clustering yang benar-benar dipakai `Bun.serve`.
+			reusePort: serverInfo.reusePort,
+			procIndex: serverInfo.procIndex,
+			time: currentIsoTime()
+		})
 	);
 
 	app.get("/random/user", (c) => {

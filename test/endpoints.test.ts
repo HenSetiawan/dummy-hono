@@ -7,11 +7,22 @@ const app = createApp();
 describe("GET /healthz", () => {
 	test("membalas ok beserta pid proses", async () => {
 		const response = await app.request("/healthz");
-		const body = (await response.json()) as { status: string; service: string };
+		const body = (await response.json()) as {
+			status: string;
+			service: string;
+			pid: number;
+			reusePort: boolean;
+			procIndex: number | null;
+		};
 
 		expect(response.status).toBe(200);
 		expect(body.status).toBe("ok");
 		expect(body.service).toBe("dummy-api-hono");
+		expect(body.pid).toBe(process.pid);
+		// Test tidak menyalakan server, jadi nilainya default - yang penting field-nya ada
+		// supaya clustering (SO_REUSEPORT) bisa diverifikasi dari luar.
+		expect(body.reusePort).toBe(false);
+		expect(body.procIndex).toBeNull();
 	});
 });
 

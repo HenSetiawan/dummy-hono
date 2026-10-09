@@ -4,11 +4,15 @@
 #   curl http://localhost:9000/random/user
 #
 # Angka RPS tertinggi didapat kalau beban datang dari **network yang sama** (bukan lewat
-# port publish / docker-proxy). Untuk itu ada profil `k6`:
+# port publish / docker-proxy). Jalankan k6 langsung dari VM/network itu (lihat README,
+# `k6/rps-items.js`) - bukan lagi dari compose ini.
 #
-#   docker compose -f dummy-api-hono/docker-compose.yml --profile k6 run --rm k6
-#
-# di situ k6 menembak http://dummy-api-hono:9000 langsung di network compose.
+# Clustering lintas container (semua core, beberapa replika berbagi port 9000):
+#   services:
+#     dummy-api-hono:
+#       network_mode: host
+#       environment: { API_PROCS: "1", REUSE_PORT: "1" }
+#       deploy: { replicas: 4 }
 services:
   dummy-api-hono:
     build:
@@ -23,6 +27,9 @@ services:
       PORT: 9000
       # `auto` = jumlah core; SO_REUSEPORT membagi koneksi antar proses (Linux only).
       API_PROCS: auto
+      # `auto` = reusePort menyala kalau API_PROCS>1. Untuk clustering lintas container
+      # (beberapa replika berbagi port 9000): API_PROCS=1 + REUSE_PORT=1 + network_mode: host.
+      REUSE_PORT: auto
       # 0 = tanpa log per request (menyalakannya memotong throughput).
       ACCESS_LOG: 0
     # Throughput tinggi = banyak koneksi bersamaan; default 1024 terlalu kecil.
@@ -43,22 +50,3 @@ services:
     init: true
     stop_grace_period: 10s
     restart: unless-stopped
-
-  # Opsional: k6 dari network yang sama (hindari overhead NAT/port publish).
-  k6:
-    image: grafana/k6:latest
-    profiles: ["k6"]
-    depends_on:
-      dummy-api-hono:
-        condition: service_healthy
-    volumes:
-      - ../k6:/scripts:ro
-    environment:
-      DUMMY_URL: http://dummy-api-hono:9000
-      TARGET_URL: http://dummy-api-hono:9000
-      PATHS: /random/user,/random/items?size=10,/random/stats,/healthz
-      VUS: "100"
-      DURATION: 20s
-    # Script k6 tersedia di ../k6 (dipakai bersama repo ini).
-    working_dir: /scripts
-    command: ["run", "/scripts/direct.js"]

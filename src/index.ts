@@ -1,6 +1,14 @@
 import { availableParallelism } from "node:os";
 import { app } from "./app.js";
-import { API_PROC_INDEX_ENV, API_PROCS_ENV, parseApiProcs, procIndexFromEnv } from "./procs.js";
+import { setServerInfo } from "./server-info.js";
+import {
+	API_PROC_INDEX_ENV,
+	API_PROCS_ENV,
+	REUSE_PORT_ENV,
+	parseApiProcs,
+	parseReusePort,
+	procIndexFromEnv
+} from "./procs.js";
 
 /**
  * Titik masuk DUMMY-API.
@@ -11,8 +19,9 @@ import { API_PROC_INDEX_ENV, API_PROCS_ENV, parseApiProcs, procIndexFromEnv } fr
  *    file yang sama, semuanya bind `PORT` dengan `SO_REUSEPORT` supaya semua core terpakai.
  *
  * Opsi `Bun.serve` yang berpengaruh ke throughput:
- * - `reusePort` hanya dinyalakan di anak (Linux) supaya single-proses tetap gagal keras kalau
- *   ada proses kedua tak sengaja (perilaku `EADDRINUSE` yang jelas);
+ * - `reusePort` (`SO_REUSEPORT`) dari env `REUSE_PORT` - default `auto`: menyala kalau
+ *   `API_PROCS > 1`. Single-proses bisa memaksanya dengan `REUSE_PORT=1` kalau memang ingin
+ *   di-cluster lintas container (lihat README bagian Clustering);
  * - `idleTimeout: 30` menahan koneksi keep-alive load test lebih lama dari default 10 detik;
  * - `development: false` mematikan error page/stack trace yang menambah kerja per request.
  * Server dipanggil eksplisit (bukan default export Bun) karena opsi `reusePort` tidak dibaca
@@ -42,14 +51,28 @@ if (!plan.ok) {
 const port = parsePort(process.env.PORT);
 const procIndex = procIndexFromEnv(process.env);
 
+// Diputuskan di supervisor dan diteruskan ke anak sebagai nilai final (`1`/`0`), supaya
+// `REUSE_PORT=auto` tidak berubah arti di anak (di anak `API_PROCS` sudah 1).
+const reusePlan = parseReusePort(process.env[REUSE_PORT_ENV], plan.procs);
+if (!reusePlan.ok) {
+	console.error(`[dummy-api] konfigurasi env tidak valid: ${reusePlan.message}`);
+	process.exit(1);
+}
+
 if (plan.procs > 1 && procIndex === null) {
-	await runSupervisor(plan.procs);
+	await runSupervisor(plan.procs, reusePlan.reusePort);
 } else {
-	runServer({ reusePort: procIndex !== null });
+	runServer({ reusePort: reusePlan.reusePort });
 }
 
 /** Satu proses yang melayani request (dipakai langsung atau sebagai anak supervisor). */
 function runServer(options: { reusePort: boolean }): void {
+	setServerInfo({
+		reusePort: options.reusePort,
+		procIndex,
+		accessLog: process.env.ACCESS_LOG === "1"
+	});
+
 	const server = Bun.serve({
 		port,
 		fetch: app.fetch,
@@ -69,14 +92,20 @@ function runServer(options: { reusePort: boolean }): void {
  * Supervisor: spawn N anak, lalu berhenti kalau salah satu anak keluar (kernel tidak punya
  * health-aware removal, jadi lebih baik gagal jelas daripada melayani dengan sebagian proses).
  */
-async function runSupervisor(procs: number): Promise<void> {
+async function runSupervisor(procs: number, reusePort: boolean): Promise<void> {
 	const children = new Map<number, Bun.Subprocess>();
 
 	try {
 		for (let index = 1; index <= procs; index += 1) {
 			const child = Bun.spawn({
 				cmd: [process.execPath, import.meta.path],
-				env: { ...process.env, [API_PROCS_ENV]: "1", [API_PROC_INDEX_ENV]: String(index) },
+				env: {
+					...process.env,
+					[API_PROCS_ENV]: "1",
+					[API_PROC_INDEX_ENV]: String(index),
+					// Nilai final (bukan `auto`) supaya anak tidak menafsir ulang.
+					[REUSE_PORT_ENV]: reusePort ? "1" : "0"
+				},
 				stdout: "inherit",
 				stderr: "inherit"
 			});
@@ -89,7 +118,10 @@ async function runSupervisor(procs: number): Promise<void> {
 		process.exit(1);
 	}
 
-	console.log(`[dummy-api] supervisor: ${procs} proses di :${port}`);
+	console.log(
+		`[dummy-api] supervisor: ${procs} proses di :${port} (reusePort=${reusePort}, ` +
+			"SO_REUSEPORT membagi koneksi baru antar proses)"
+	);
 	if (process.platform !== "linux") {
 		console.warn(
 			`[dummy-api] ${API_PROCS_ENV}>1 di ${process.platform}: SO_REUSEPORT tidak membagi ` +

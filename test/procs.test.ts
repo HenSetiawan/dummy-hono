@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_API_PROCS, parseApiProcs, procIndexFromEnv } from "../src/procs";
+import { MAX_API_PROCS, parseApiProcs, parseReusePort, procIndexFromEnv } from "../src/procs";
 
 describe("parseApiProcs", () => {
 	test("kosong atau 1 berarti satu proses", () => {
@@ -36,5 +36,27 @@ describe("procIndexFromEnv", () => {
 		expect(procIndexFromEnv({ API_PROC_INDEX: "-1" })).toBeNull();
 		expect(procIndexFromEnv({ API_PROC_INDEX: "anak" })).toBeNull();
 		expect(procIndexFromEnv({})).toBeNull();
+	});
+});
+
+describe("parseReusePort", () => {
+	test("auto menyala hanya kalau multi-proses", () => {
+		expect(parseReusePort(undefined, 1)).toEqual({ ok: true, reusePort: false });
+		expect(parseReusePort("", 4)).toEqual({ ok: true, reusePort: true });
+		expect(parseReusePort("auto", 4)).toEqual({ ok: true, reusePort: true });
+		expect(parseReusePort("auto", 1)).toEqual({ ok: true, reusePort: false });
+	});
+
+	test("1/0 memaksa nilainya (dipakai untuk clustering lintas container)", () => {
+		expect(parseReusePort("1", 1)).toEqual({ ok: true, reusePort: true });
+		expect(parseReusePort("TRUE", 1)).toEqual({ ok: true, reusePort: true });
+		expect(parseReusePort("0", 8)).toEqual({ ok: true, reusePort: false });
+		expect(parseReusePort("off", 8)).toEqual({ ok: true, reusePort: false });
+	});
+
+	test("nilai lain ditolak dengan pesan env-nya", () => {
+		const bad = parseReusePort("mungkin", 2);
+		expect(bad.ok).toBe(false);
+		expect(bad.ok === false && bad.message).toContain("REUSE_PORT");
 	});
 });
